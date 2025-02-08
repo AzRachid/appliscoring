@@ -1,13 +1,14 @@
+ 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
+import re
 import joblib
 import lime
 import lime.lime_tabular
 from typing import List, Dict
 import uvicorn
-import os
 
 # Initialisation de l'API
 app = FastAPI(
@@ -54,6 +55,7 @@ class Distribution(BaseModel):
     client_value: float
 
 # Routes API
+
 @app.get("/")
 def read_root():
     """Page d'accueil de l'API"""
@@ -88,42 +90,42 @@ def get_client_data(client_id: int):
         'decision': decision
     }
 
+
 @app.get("/analyze/{client_id}", response_model=FeatureImportance)
 def get_feature_importance(client_id: int):
     """Renvoie les importances globales et locales des features"""
+
     if client_id not in data['SK_ID_CURR'].values:
         raise HTTPException(status_code=404, detail="Client non trouvé")
 
-    # Transformation des données
     data_transformed = model.named_steps['preprocessor'].transform(data.drop(columns=['SK_ID_CURR']))
-    data_selected = data_transformed[:, selected_features_indices]
+    data_selected = data_transformed[:, selected_features_indices] 
 
-    # Récupération des données du client
     row = data[data['SK_ID_CURR'] == client_id].drop(columns=['SK_ID_CURR'])
     row_transformed = model.named_steps['preprocessor'].transform(row)
-    row_selected = row_transformed[:, selected_features_indices]
+    row_selected = row_transformed[:, selected_features_indices] 
 
-    # Explication LIME pour l'importance locale
     explainer = lime.lime_tabular.LimeTabularExplainer(
-        training_data=data_selected,
+        training_data=data_selected,  
         feature_names=selected_features,
         mode="classification"
     )
-    final_estimator = model.named_steps['classifier']
+
+    final_estimator = model.named_steps['classifier']  
+
     exp = explainer.explain_instance(
         row_selected[0],
         lambda X: final_estimator.predict_proba(X)
-    )
+    ) 
     local_importance = pd.DataFrame(exp.as_list(), columns=["Feature", "Impact"]).head(10)
+ 
 
-    # Importance globale (coefficients du modèle)
     coefficients = model.named_steps['classifier'].coef_[0]
     global_importance = pd.DataFrame({
         'Feature': selected_features,
         'Importance': coefficients
-    }).sort_values('Importance', key=abs, ascending=False).head(10)
+    }).sort_values('Importance', key=abs, ascending=False).head(10) 
 
-    # Retourner les résultats
     return {
         'global_importance_names': global_importance['Feature'].tolist(),
         'global_importance_values': global_importance['Importance'].tolist(),
@@ -131,30 +133,7 @@ def get_feature_importance(client_id: int):
         'local_importance_values': local_importance['Impact'].tolist(),
     }
 
-@app.get("/variables", response_model=List[str])
-def get_variables():
-    """Renvoie la liste des variables disponibles"""
-    return data.drop(columns=['SK_ID_CURR']).columns.tolist()
 
-@app.get("/distribution/{variable}", response_model=Distribution)
-def get_distribution(variable: str):
-    """Renvoie la distribution d'une variable selon la cible"""
-    if variable not in data.columns:
-        raise HTTPException(status_code=404, detail="Variable non trouvée")
-
-    # Simuler les données de distribution (remplacez cela par vos propres données si nécessaire)
-    accepted_values = data[data['TARGET'] == 0][variable].dropna().tolist()
-    rejected_values = data[data['TARGET'] == 1][variable].dropna().tolist()
-
-    return {
-        'accepted_values': accepted_values,
-        'rejected_values': rejected_values,
-        'accepted_mean': np.mean(accepted_values),
-        'rejected_mean': np.mean(rejected_values),
-        'client_value': None  # À remplacer par la valeur du client si nécessaire
-    }
-
-# Point d'entrée de l'application
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
