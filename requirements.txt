@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+numpy
+scikit-learn==1.6.1
+pandas
+joblib
+imbalanced-learn==0.13.0
