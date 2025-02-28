@@ -6,134 +6,146 @@ import os
 import joblib
 import lime
 import lime.lime_tabular
-from typing import List, Dict
+from typing import List, Dict, Optional
 import uvicorn
 
 # Initialisation de l'API
 app = FastAPI(
-    title="API Scoring Crédit",
-    description="API pour le dashboard de scoring crédit",
+    title="API Scoring Credit",
+    description="API pour le dashboard de scoring credit",
     version="1.0.0"
 )
 
-# Chargement des données
+# Chargement des donnees
 data = pd.read_csv("./test_data.csv", encoding="utf-8")
 
 # Chargement du modèle
 model = joblib.load("./pipeline_production.joblib")
 
-# Récupération des features sélectionnées
+# Recuperation des features selectionnees
 selected_features_indices = model.named_steps['feature_selection'].get_support(indices=True)
 selected_features = data.drop(columns=['SK_ID_CURR']).columns[selected_features_indices]
 
-# Seuil de décision
+# Seuil de decision
 THRESHOLD = 0.46
 
-# Modèle pour la réponse
+# Modèle pour la reponse
 class ClientData(BaseModel):
-    # Informations client
     client_id: int
-    age: float
-    income: float
-    employment_length: float
-    credit_amount: float
+    age: Optional[float]
+    income: Optional[float]
+    employment_length: Optional[float]
+    credit_amount: Optional[float]
     score: float
     decision: str
-    # Importances des features
     global_importance_names: List[str]
     global_importance_values: List[float]
     local_importance_names: List[str]
     local_importance_values: List[float]
-    # Valeurs du client pour les variables importantes
-    client_important_values: Dict[str, float]
+    client_important_values: Dict[str, Optional[float]]
 
+# Fonction pour nettoyer les valeurs incompatibles avec JSON
+def clean_json(obj):
+    """Remplace les valeurs non compatibles avec JSON (NaN, Inf)"""
+    if isinstance(obj, float) and (pd.isna(obj) or np.isinf(obj)):
+        return None
+    elif isinstance(obj, dict):
+        return {k: clean_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_json(v) for v in obj]
+    return obj
 
 # Routes API
 @app.get("/")
 def read_root():
     """Page d'accueil de l'API"""
-    return {"message": "API Scoring Crédit - Prêt à dépenser"}
+    return {"message": "API Scoring Credit - Pret a depenser"}
 
 @app.get("/client/{client_id}", response_model=ClientData)
 def get_client_data(client_id: int):
     """Renvoie toutes les informations d'un client et les importances des features"""
-    # Vérification de l'existence du client
+    
+    # Verification de l'existence du client
     if client_id not in data['SK_ID_CURR'].values:
-        raise HTTPException(status_code=404, detail="Client non trouvé")
+        raise HTTPException(status_code=404, detail="Client non trouve")
 
-    # Récupération des données du client
+    # Recuperation des donnees du client
     client_row = data[data['SK_ID_CURR'] == client_id].drop(columns=['SK_ID_CURR'])
 
-    # Informations client
+    # Gestion des valeurs optionnelles
+    employment_length = None if pd.isna(client_row['DAYS_EMPLOYED'].values[0]) else abs(client_row['DAYS_EMPLOYED'].values[0] / 365)
+    age = None if pd.isna(client_row['DAYS_BIRTH'].values[0]) else abs(client_row['DAYS_BIRTH'].values[0] / 365)
+    income = None if pd.isna(client_row['AMT_INCOME_TOTAL'].values[0]) else client_row['AMT_INCOME_TOTAL'].values[0]
+    credit_amount = None if pd.isna(client_row['AMT_CREDIT'].values[0]) else client_row['AMT_CREDIT'].values[0]
+
     client_info = {
         'client_id': client_id,
-        'age': abs(client_row['DAYS_BIRTH'].values[0] / 365),  # Conversion en années
-        'income': client_row['AMT_INCOME_TOTAL'].values[0],
-        'employment_length': abs(client_row['DAYS_EMPLOYED'].values[0] / 365),  # Conversion en années
-        'credit_amount': client_row['AMT_CREDIT'].values[0],
+        'age': age,
+        'income': income,
+        'employment_length': employment_length,
+        'credit_amount': credit_amount,
     }
 
     # Calcul du score
     probability = model.predict_proba(client_row)[:, 1][0]
-    decision = "Refusé" if probability > THRESHOLD else "Accepté"
-    
+    decision = "Refuse" if probability > THRESHOLD else "Accepte"
+
     score_info = {
         'score': probability,
         'decision': decision
     }
 
-    # Transformation des données pour le calcul des importances
+    # Transformation des donnees pour le calcul des importances
     data_transformed = model.named_steps['preprocessor'].transform(data.drop(columns=['SK_ID_CURR']))
-    data_selected = data_transformed[:, selected_features_indices] 
+    data_selected = data_transformed[:, selected_features_indices]
 
     row_transformed = model.named_steps['preprocessor'].transform(client_row)
-    row_selected = row_transformed[:, selected_features_indices] 
+    row_selected = row_transformed[:, selected_features_indices]
 
-    # Création de l'explainer LIME
+    # Creation de l'explainer LIME
     explainer = lime.lime_tabular.LimeTabularExplainer(
-        training_data=data_selected,  
+        training_data=data_selected,
         feature_names=selected_features,
         mode="classification"
     )
 
     # Extraction du classifieur final du pipeline
-    final_estimator = model.named_steps['classifier']  
+    final_estimator = model.named_steps['classifier']
 
-    # Génération des explications locales
+    # Generation des explications locales
     exp = explainer.explain_instance(
         row_selected[0],
         lambda X: final_estimator.predict_proba(X)
-    ) 
+    )
     local_importance = pd.DataFrame(exp.as_list(), columns=["Feature", "Impact"]).head(10)
- 
+
     # Calcul des importances globales
     coefficients = model.named_steps['classifier'].coef_[0]
     global_importance = pd.DataFrame({
         'Feature': selected_features,
         'Importance': coefficients
-    }).sort_values('Importance', key=abs, ascending=False).head(10) 
+    }).sort_values('Importance', key=abs, ascending=False).head(10)
 
-
-
-    # Création du dictionnaire d'importances des features
+    # Creation du dictionnaire d'importances des features
     feature_importance = {
         'global_importance_names': global_importance['Feature'].tolist(),
         'global_importance_values': global_importance['Importance'].tolist(),
         'local_importance_names': local_importance['Feature'].tolist(),
         'local_importance_values': local_importance['Impact'].tolist()
     }
-    
-    # Récupération des valeurs du client pour les variables importantes
+
+    # Recuperation des valeurs du client pour les variables importantes
     important_features = global_importance['Feature'].tolist()
     client_values = client_row[important_features].iloc[0].to_dict()
-    client_values = {k: float(v) for k, v in client_values.items()}
+    client_values = {k: (None if pd.isna(v) else float(v)) for k, v in client_values.items()}
 
     client_important_values = {'client_important_values': client_values}
 
     # Combinaison de toutes les informations
     result = {**client_info, **score_info, **feature_importance, **client_important_values}
-    
-    return result
+
+    # Nettoyage final des NaN et Inf avant de retourner la reponse
+    return clean_json(result)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
